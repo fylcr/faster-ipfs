@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>分片文件下载</title>
+    <meta charset="UTF-8">
+</head>
+<body>
+    <div id="status"></div>
+    <button id="actionBtn">开始下载</button>
+
+    <script>
+        // 用户配置区（只需修改这里）////////////////////////////////
+        const config = {
+            fileName: 'name',     // 文件名（不带后缀）
+            extension: 'houzhui', // 文件后缀
+            totalParts: 10,       // 总分片数
+            maxThreads: 6         // 调整为浏览器友好值（重要修改）
+        };
+        ////////////////////////////////////////////////////////
+
+        let isDownloading = false;
+        let controller = null;
+        let chunks = [];  // 修改为let以便重置
+
+        // 初始化界面（新增重置逻辑）
+        function initUI() {
+            chunks = new Array(config.totalParts);  // 每次初始化清空
+            document.getElementById('status').textContent = 
+                `您将要下载${config.fileName}.${config.extension}，点击按钮便可下载`;
+            document.getElementById('actionBtn').textContent = '开始下载';
+            document.getElementById('actionBtn').style.display = 'block'; // 确保按钮可见
+        }
+
+        // 更新进度显示（新增动画提示）
+        function updateProgress(downloaded) {
+            const percent = Math.floor((downloaded / config.totalParts) * 100);
+            document.getElementById('status').textContent = 
+                `已下载${percent}%，请您耐心等待`;
+            document.getElementById('status').dataset.loading = !!isDownloading;
+        }
+
+        // 创建分片下载任务（增强错误处理）
+        async function createDownloadTask(part) {
+            try {
+                const url = `${config.fileName}_${part}.${config.extension}?t=${Date.now()}`;
+                const response = await fetch(url, { 
+                    signal: controller.signal,
+                    mode: 'no-cors' // 修改为简单模式
+                });
+                
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const buffer = await response.arrayBuffer();
+                chunks[part - 1] = new Uint8Array(buffer); // 使用类型数组优化内存
+                return true;
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error(`分片${part}下载失败:`, error);
+                    document.getElementById('status').textContent = 
+                        `分片${part}下载失败（${error.message}）`;
+                }
+                return false;
+            }
+        }
+
+        // 并发控制器（修复队列竞争问题）
+        async function parallelDownload() {
+            let downloaded = 0;
+            const partNumbers = Array.from({length: config.totalParts}, (_, i) => i + 1);
+            
+            async function processPart(part) {
+                if (await createDownloadTask(part)) {
+                    downloaded++;
+                    updateProgress(downloaded);
+                }
+            }
+
+            // 使用分块处理代替队列竞争
+            const chunkSize = Math.ceil(config.totalParts / config.maxThreads);
+            const promises = [];
+            
+            for (let i = 0; i < config.maxThreads; i++) {
+                const start = i * chunkSize;
+                const end = Math.min(start + chunkSize, config.totalParts);
+                promises.push((async () => {
+                    for (let part = start + 1; part <= end; part++) {
+                        await processPart(part);
+                    }
+                })());
+            }
+            
+            await Promise.all(promises);
+            return downloaded === config.totalParts;
+        }
+
+        // 主下载流程（新增初始化检查）
+        async function startDownload() {
+            if (isDownloading) return;
+            
+            // 重置状态
+            initUI();
+            isDownloading = true;
+            controller = new AbortController();
+            document.getElementById('actionBtn').textContent = '取消下载';
+            
+            try {
+                updateProgress(0); // 强制显示初始进度
+                const success = await parallelDownload();
+                if (success) {
+                    document.getElementById('status').textContent = '下载完成，感谢您的使用';
+                    mergeAndDownload();
+                    document.getElementById('actionBtn').style.display = 'none';
+                }
+            } catch (error) {
+                document.getElementById('status').textContent = 
+                    error.name === 'AbortError' ? '下载已取消' : `下载失败：${error.message}`;
+            } finally {
+                isDownloading = false;
+                controller = null;
+                document.getElementById('actionBtn').textContent = '开始下载';
+            }
+        }
+
+        // 合并文件（优化内存使用）
+        function mergeAndDownload() {
+            try {
+                const totalSize = chunks.reduce((sum, c) => sum + c.length, 0);
+                const merged = new Uint8Array(totalSize);
+                let offset = 0;
+                
+                chunks.forEach(chunk => {
+                    merged.set(chunk, offset);
+                    offset += chunk.length;
+                });
+
+                const blob = new Blob([merged.buffer], { type: 'application/octet-stream' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${config.fileName}.${config.extension}`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            } catch (error) {
+                console.error('文件合并失败:', error);
+                document.getElementById('status').textContent = 
+                    '文件合并失败，内存不足';
+            }
+        }
+
+        // 事件绑定
+        document.getElementById('actionBtn').addEventListener('click', () => {
+            if (isDownloading) {
+                controller.abort();
+            } else {
+                startDownload();
+            }
+        });
+
+        // 初始化（确保DOM加载完成）
+        document.addEventListener('DOMContentLoaded', initUI);
+    </script>
+    <style>
+        /* 新增加载动画 */
+        #status[data-loading]::after {
+            content: '...';
+            display: inline-block;
+            width: 1em;
+            animation: dots 1s infinite;
+        }
+        @keyframes dots {
+            33% { content: '.'; }
+            66% { content: '..'; }
+            100% { content: '...'; }
+        }
+    </style>
+</body>
+</html>
